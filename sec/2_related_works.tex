@@ -1,0 +1,16 @@
+\section{Related Works}
+\label{sec:Related Works}
+
+\textbf{Uncalibrated 3D Face Tracking.} Prior works that reconstruct 3D face from uncalibrated 2D images can be broadly characterized into three categories: 
+
+\subsection{3DMM Prediction Methods}
+
+Given a 3DMM setup such as FLAME \cite{FLAME:SiggraphAsia2017}, 3DMM prediction methods formulate face tracking as a regression of the 3DMM parameters representing the face in the 2D image \cite{emoca,deca, spark}. These parameters are often associated with the face's shape, expression, and pose. To this end, methods often involve a convolutional encoder to extract latent image features; then, a decoder is applied to output corresponding 3DMM parameters. Often, photometric loss is used via differentiable rendering to ensure prediction quality. Even though dense pixel alignment is available, as an optimization problem, it is ill-posed due to shading and texture ambiguities; additionally, no 3D information can be leveraged, resulting in poor prediction quality. 
+
+\subsection{3DMM Fitting Methods}
+
+Fitting-based methods resolve the ambiguities from photometric loss by producing more explicit signals such as 2D vertex alignment or per-pixel normals. Then, in the fitting stage, these methods perform iterative optimizations, such as inverse rendering, to fit a set of 3DMM parameters consistent with their predicted signals \cite{flowface,faceanything,pixel3dmm}. Though these methods produce a higher-fidelity mesh through iterative fitting, this turns inference into an extremely slow process, and their optimizations is purely 2D-based and leverage no 3D information. Even methods that incorporate 3D foundational models, such as FaceAnything, turn their predicted depth map into a normal map, effectively losing 3D information during fitting. Additionally, the predicted mesh quality is dependent on 3DMM expressiveness and face pixel visibility in the input image and is not robust against occluded input. 
+
+\subsection{3DMM Free Methods}
+
+Recently, with the promising performance from large-scale 3D reconstruction models \cite{wang2026vggtomega,depthanything3,pi3}, emerging methods begin to formulate face-tracking as a 3D reconstruction problem. Through multiview face images, these works first use 3D foundation models to retrieve depth and camera information, then fuse them into a mesh representation free of 3DMM parametrization\cite{uvfacefusion,vggtface}. Though the predicted meshes from these works are no longer constrained by a parametric model, their methods are sensitive to occlusion and are only robust when a large number of camera views are available. Consequently, the applicability of these methods are heavily constrained. In our model, we design it to be 3DMM-free, allowing for maximum expressiveness; additionally, we overcome these usage constraint extend our model's capability to both monocular and multiview settings by leveraging 3D foundational models.
