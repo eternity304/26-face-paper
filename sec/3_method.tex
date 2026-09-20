@@ -4,10 +4,270 @@
 \begin{figure*}[t!]
     \centering
     \includegraphics[width=\textwidth]{fig/architecture_v1.png}
-    \caption{Model Architecture}
+    \caption{
+        \textbf{Method overview.}
+        A pretrained geometry encoder aggregates a variable number of input
+        views and lifts their image features into 3D feature volumes. Two
+        recurrent flow branches correlate learned canonical-face embeddings
+        with these volumes. The expression branch reconstructs the observed
+        facial geometry, while the neutral branch recovers the identity-only
+        geometry of the same subject. Both branches iteratively update a
+        projective 3D flow field and unproject the resulting image coordinates
+        and metric depths to obtain a mesh with canonical correspondence.
+    }
     \label{fig:overview}
 \end{figure*}
 
-Please follow the steps outlined below when submitting your manuscript to the IEEE Computer Society Press.
-This style guide now has several important modifications (for example, you are no longer warned against the use of sticky tape to attach your artwork to the paper), so all authors should read this new version.
+% This formulation retains the dense correspondence and recurrent refinement of optical-flow
+% methods, while extending the flow state into 3D with a depth component. As illustrated
+% in \cref{fig:overview}, our method first encodes the input observations into 3D
+% feature volumes. A 3D RAFT decoder then matches learned embeddings of the
+% canonical face against each volume and iteratively refines the flow. Two
+% independent decoders predict the observed expression geometry and the neutral
+% identity geometry, respectively. Finally, an externally estimated depth
+% anchor converts the relative depth prediction into metric camera-space
+% geometry.
 
+
+\subsection{Problem Formulation}
+\label{sec:problem_formulation}
+
+Consider two images $\mathbf{I}_1$ and $\mathbf{I}_2$ of the same face, taken
+from arbitrary viewpoint and time. Let $\mathbf{X}_t[p]\in\mathbb{R}^{3}$
+denote the 3D position of facial point $p$
+in observation $t$. We define its scene flow from $\mathbf{I}_1$ to
+$\mathbf{I}_2$ as the $\hat{\mathbf{S}}_{1\rightarrow2}[p]$ that satisfies
+\begin{equation}
+    \hat{\mathbf{X}}_2[p]
+    = \mathbf{X}_1[p]+\hat{\mathbf{S}}_{1\rightarrow2}[p].
+    \label{eq:scene_flow}
+\end{equation}
+All 3D points are expressed in a common coordinate frame; the definition is
+therefore independent of whether the change between the observations is caused
+by facial motion or camera motion.
+
+Let $\mathbf{u}_1[p]=(i_1,j_1)$ and $z_1[p]$ be the image coordinate and depth
+of $p$ in $\mathbf{I}_1$. Instead of regressing the 3D displacement directly,
+we estimate its optical-flow component $\boldsymbol{\mu}[p]$ and depth change
+$\Delta z[p]$, which together determine the point in $\mathbf{I}_2$ as
+\begin{align}
+    \hat{\mathbf{u}}_2[p]
+        &= \mathbf{u}_1[p]+\boldsymbol{\mu}[p], \\
+    \hat z_2[p]
+        &= z_1[p]+\Delta z[p], \\
+    \hat{\mathbf{X}}_2[p]
+        &= \pi_2^{-1}\!\left(\hat{\mathbf{u}}_2[p],\hat z_2[p]\right),
+    \label{eq:flow_unprojection}
+\end{align}
+where $\pi_2^{-1}$ denotes unprojection under the camera of
+$\mathbf{I}_2$. Thus, estimating scene flow reduces to estimating a 2D optical
+flow and a one-dimensional depth change for every facial point.
+
+For our method specifically, we fix the canonical face mesh as the first
+observation.
+Each canonical point has a fixed 3D position, depth $z_p^c$, and UV coordinate,
+and the model predicts $\boldsymbol{\mu}[p]$ and $\Delta z[p]$ that parametrize
+the flow field from the canonical face mesh to the face in the input image.
+
+
+\subsection{Network Architecture}
+\label{sec:network_architecture}
+
+Given one or more face images of a subject, our network recovers the 3D
+positions of dense facial landmarks defined by a fixed canonical mesh topology.
+It predicts both the observed expression geometry and the expression-neutral
+identity geometry while preserving this vertex correspondence.
+To this end, we first encode the inputs with a mutliview encoder that follows with
+a learnt feedforward layer that lifts the images features into 3D feature volumes.
+Then, two recurrent flow branches iteratively refine the 3D flow components
+for each point on the canonical face before recovering the corresponding 3D expression
+and identity meshes.
+
+\paragraph{Multi-View Geometry 3D Encoding.}
+\label{sec:multiview_encoder}
+We use a pretrained 3D foundational encoder, following recent general-purpose reconstruction
+models~\cite{wang2026vggtomega,depthanything3,pi3}. It consist of transformer layers with two type
+of attention ordered in alternate, processing both per-view, and cross-view information.
+This allows the model to take a set $\mathcal{I}=\{\mathbf{I}^i\}_{i=1}^{N}$ of face image
+with $N\geq1$ as input, supporting both monocular and multiview inferences. For each of image latent features $\mathbf{X^i}$ produced,
+a learned decoder transform them into an 3D voxel feature grid $\mathbf{F}^i\in\mathbb{R}^{C\times V\times U\times D}$.
+Here $V$ and $U$ index the $xy$ image-plane position and $D$ indexes depth.
+
+\paragraph{UV-3D Flow}
+We extend the recurrent all-pairs matching strategy of
+RAFT~\cite{teed2020raft} from a 2D image grid to a canonical UV domain and a 3D
+feature volume. We follow FlowFace's embedding architecture and parametrizes our flow map using a
+2D UV map that parametrizes per vertex scene flow. Its corresponding is a learned network module consisting of a 32 channel texture pyramid
+under 3 levels of coarse to fine resolution. Further, RAFT's hidden state $h_0$, positionl embedding $u_0$, context $c$ are initialized in the
+same manner.
+
+The RAFT network is designed to compute correlation between two images using a 4D
+correlttion volume; we extend this design to computing correlation between the 2D UV map representing scene flow and
+the 3D voxel feature, outputing a 5D correlation volume $\mathbf{C}$. Then, for each iteration $k$ during inference,
+the model performs a look up in the correlation volume base on the current follow estimation $S^{i}_{k-1}$.
+Using the look up, previous flow $S^{i}_{k-1}$, context $c$, it refine output the new flow estimate $S^{i}_{k}$.
+Throughout, the superscript $i$ indexes an input image and the subscript $k$
+indexes a recurrent refinement iteration.
+Formally, the recurrent update module $f_\theta$ has form:
+
+\begin{equation}
+    \mathbf{S}^{i}_{k}, \mathbf{h}^{i}_{k}
+    = f_\theta(\mathbf{C}(\mathbf{X}^{i},\mathbf{F}^{i}),
+    \mathbf{S}^{i}_{k-1}, \mathbf{c}, \mathbf{h}^{i}_{k-1})
+\end{equation}
+
+
+
+\subsection{Mesh Reconstruction}
+\label{sec:metric_depth}
+
+After $K$ recurrent iterations, the final flow $\mathbf{S}^{i}_{K}$ is
+decoded into an optical flow $\boldsymbol{\mu}^{i}[p]$ and a relative depth
+change $\Delta z^{i}[p]$ for every canonical UV coordinate $p$:
+\begin{equation}
+    \mathbf{S}^{i}_{K}[p]
+    =
+    \begin{bmatrix}
+        \boldsymbol{\mu}^{i}[p] \\
+        \Delta z^{i}[p]
+    \end{bmatrix}.
+    \label{eq:decoded_flow}
+\end{equation}
+Let $\mathbf{u}^{c}[p]$ and $z^{c}[p]$ denote the fixed UV coordinate and
+relative depth of point $p$ on the canonical mesh. Following
+\cref{sec:problem_formulation}, we add the predicted flow components to their
+canonical coordinates:
+\begin{equation}
+    \tilde{\mathbf{u}}^{i}[p]
+        = \mathbf{u}^{c}[p]+\boldsymbol{\mu}^{i}[p],
+    \qquad
+    \tilde z^{i}[p]
+        = z^{c}[p]+\Delta z^{i}[p].
+    \label{eq:canonical_flow_decode}
+\end{equation}
+This yields the image position and relative depth of every output vertex at relative scale/
+
+Metric-depth recovery is out of scope of our model. We obtain a near-depth
+estimate $z_{\mathrm{near}}^{i}$ from an off-the-shelf depth predictor and use
+it to define an adaptive metric interval. Given the image width
+$W_{\mathrm{img}}$, focal length $f_x^{i}$, a fixed extent factor $\rho$, and
+margin $m$, the interval is
+\begin{align}
+    z_{\min}^{i}
+        &= z_{\mathrm{near}}^{i}-m, \\
+    z_{\max}^{i}
+        &= z_{\mathrm{near}}^{i}
+        \left(1+\rho\frac{W_{\mathrm{img}}}{f_x^{i}}\right)+m.
+    \label{eq:depth_bounds}
+\end{align}
+The ratio $W_{\mathrm{img}}/f_x^{i}$ is the angular width of the face crop.
+Thus, the interval extent adapts to both camera field of view and subject
+distance without requiring a separately predicted far bound.
+
+We map the decoded relative depth to a normalized coordinate and scale it to
+this interval:
+\begin{equation}
+    \hat z^{i}[p]
+    = z_{\min}^{i}
+      +\tilde z^{i}[p](z_{\max}^{i}-z_{\min}^{i}).
+    \label{eq:relative_to_metric}
+\end{equation}
+
+Finally, we unproject the predicted image position and metric depth to recover
+the 3D mesh vertex:
+\begin{equation}
+    \hat{\mathbf{X}}^{i}[p]
+    = \pi^{-1}( \tilde u^{i}[p], \hat z^{i}[p])
+    \label{eq:unprojection}
+\end{equation}
+
+
+\subsection{Expression and Neutral Geometry Branches}
+\label{sec:dual_branch}
+
+A face observation contains both subject-specific identity geometry and
+transient expression deformation. We recover both using two recurrent UV--3D
+flow branches. Let $b\in\{\mathrm{expr},\mathrm{neu}\}$ denote a branch and
+$\mathbf{S}^{i,b}_{k}$ its flow estimate for input image $i$ after iteration
+$k$. The expression branch predicts $\mathbf{S}^{i,\mathrm{expr}}_{K}$, which
+maps the canonical mesh to the observed facial geometry. The neutral branch
+predicts $\mathbf{S}^{i,\mathrm{neu}}_{K}$, which maps the same canonical mesh
+to the expression-neutral geometry of the subject.
+
+The two branches share the multiview encoder, 3D voxel decoder, and learned
+canonical UV initialization. Each branch has an independent motion encoder,
+recurrent update block, and flow head, allowing it to query the correlation
+volume along a branch-specific flow trajectory. We apply the reconstruction
+procedure in \cref{sec:metric_depth} independently to each final flow to obtain
+the expression mesh $\hat{\mathcal{M}}^{i,\mathrm{expr}}$ and neutral identity
+mesh $\hat{\mathcal{M}}^{i,\mathrm{neu}}$ in a single forward pass.
+
+
+\subsection{Training Objectives}
+\label{sec:training_objectives}
+
+We supervise both branches using ground truth meshes with the canonical
+topology. For branch $b\in\{\mathrm{expr},\mathrm{neu}\}$, let
+$\mathbf{X}^{i,b,*}[p]$ be the ground-truth position of vertex $p$ for input
+image $i$. The expression target is the observed facial geometry, while the
+neutral target is the expression-neutral geometry of the same subject. We
+project each target using the camera intrinsics $\mathbf{K}^{i}$ to obtain its
+normalized image position $\mathbf{u}^{i,b,*}[p]$ and metric depth
+$z^{i,b,*}[p]$.
+
+Following \cref{sec:metric_depth}, we reconstruct the image position
+$\tilde{\mathbf{u}}_{k}^{i,b}[p]$ and metric depth $\hat z_{k}^{i,b}[p]$ at
+every recurrent iteration. We supervise these coordinates with
+\begin{equation}
+    \begin{aligned}
+        \mathcal{L}_{\mathrm{coord},k}^{i,b}
+        = \frac{1}{N_v}\sum_{p=1}^{N_v} w_p \big[&
+        \|\tilde{\mathbf{u}}_{k}^{i,b}[p]
+        -\mathbf{u}^{i,b,*}[p]\|_2^2 \\
+        &+ \lambda_z
+        (\hat z_{k}^{i,b}[p]-z^{i,b,*}[p])^2 \big].
+    \end{aligned}
+    \label{eq:coordinate_loss}
+\end{equation}
+where $N_v$ is the number of vertices, $w_p$ is a predefined vertex weight,
+and $\lambda_z$ balances image-plane and depth errors.
+
+To preserve local surface orientation, we unproject the prediction and compute
+per-vertex normals using the fixed mesh topology. We minimize their cosine
+distance to the ground-truth normals:
+\begin{equation}
+    \mathcal{L}_{\mathrm{normal},k}^{i,b}
+    =
+    \frac{
+        \sum_{p=1}^{N_v} w_p
+        \left(1-
+        \hat{\mathbf{n}}_{k}^{i,b}[p]\cdot
+        \mathbf{n}^{i,b,*}[p]\right)
+    }{
+        \sum_{p=1}^{N_v}w_p
+    }.
+    \label{eq:normal_loss}
+\end{equation}
+
+We supervise all recurrent predictions with exponentially increasing weight
+toward the final iteration. Defining $\lambda_{\mathrm{expr}}=1$, the complete
+dual-branch objective is
+\begin{equation}
+    \mathcal{L}
+    =
+    \sum_{b\in\{\mathrm{expr},\mathrm{neu}\}}\lambda_b
+    \sum_{k=1}^{K}\gamma^{K-k}
+    \left(
+        \mathcal{L}_{\mathrm{coord},k}^{i,b}
+        +\lambda_n\mathcal{L}_{\mathrm{normal},k}^{i,b}
+    \right),
+    \label{eq:total_loss}
+\end{equation}
+averaged over all input images in the batch. Here, $\gamma$ is the recurrent
+decay factor, $\lambda_n$ weights normal consistency, and
+$\lambda_{\mathrm{neu}}$ controls the neutral branch.
+
+In our implementation, we use $K=4$, $\gamma=0.6$, $\lambda_z=0.5$,
+$\lambda_n=0.1$, and $\lambda_{\mathrm{neu}}=1$. Training uses direct
+registered 3D supervision and requires neither photometric inverse rendering
+nor test-time optimization.
